@@ -47,6 +47,7 @@ section[data-testid="stSidebar"] { background: #111318; border-right: 1px solid 
 .status-panel { background: #141720; border: 1px solid #1e2330; border-radius: 10px; padding: 20px; margin-top: 16px; }
 .metric-highlight { font-size: 13px; color: #94a3b8; margin-bottom: 4px; }
 .metric-highlight span { color: #f1f5f9; font-weight: 600; }
+.mode-card { background: #141720; border: 1px solid #1e2330; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -68,14 +69,14 @@ with st.sidebar:
     st.markdown("<div style='font-size:11px;color:#334155'>Entity resolution · Phone de-masking · TabFM prep</div>", unsafe_allow_html=True)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 # PAGE 1 — DASHBOARD
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 if page == "🏠  Dashboard":
     st.markdown("<h2 style='color:#f1f5f9;margin-bottom:4px'>Customer Payment Analytics</h2><p style='color:#64748b;font-size:13px'>Entity resolution, phone de-masking, and transactional behaviour extraction.</p>", unsafe_allow_html=True)
 
     if st.session_state.df is None:
-        st.info("👋 No data loaded yet. Go to **⚙️ Run Pipeline** to upload your M-Pesa Excel file.")
+        st.info("👋 No data loaded yet. Go to **⚙️ Run Pipeline** to upload your M-Pesa file.")
         st.stop()
 
     df = st.session_state.df
@@ -123,7 +124,7 @@ if page == "🏠  Dashboard":
             agg["Total_Spent"] = 0.0
         agg = agg.sort_values("Total_Spent", ascending=False).reset_index(drop=True)
 
-        search = st.text_input("🔍 Filter by name, phone, or ID", placeholder="e.g. JOHN, 2547…, MC_1")
+        search = st.text_input("🔍 Filter by name, phone, or ID", placeholder="e.g. JOHN, 2547..., MC_1")
         cert_filter = st.selectbox("Certainty Level", ["All","High","Medium","Low"])
         filtered = agg.copy()
         if search:
@@ -162,62 +163,211 @@ if page == "🏠  Dashboard":
     st.download_button("⬇️  Download Full Cleaned CSV", data=csv_bytes, file_name="mpesa_cleaned.csv", mime="text/csv")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 # PAGE 2 — RUN PIPELINE
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 elif page == "⚙️  Run Pipeline":
-    st.markdown("<h2 style='color:#f1f5f9;margin-bottom:4px'>⚙️ Pipeline Runner</h2><p style='color:#64748b;font-size:13px'>Upload your M-Pesa Excel file (.xlsx) and run the full cleaning & entity resolution pipeline.</p>", unsafe_allow_html=True)
+    st.markdown(
+        "<h2 style='color:#f1f5f9;margin-bottom:4px'>⚙️ Pipeline Runner</h2>"
+        "<p style='color:#64748b;font-size:13px'>Choose your data source — upload a raw M-Pesa Excel to run the full pipeline, "
+        "or load a pre-processed CSV output directly for instant results.</p>",
+        unsafe_allow_html=True,
+    )
 
-    uploaded = st.file_uploader("Upload M-Pesa Excel (.xlsx)", type=["xlsx","xls","csv"], help="File must have a 'Details' column in M-Pesa statement format.")
-    sheet_hint = st.text_input("Sheet name (optional)", placeholder="Leave blank to auto-detect")
-    run_btn = st.button("🚀 Run Pipeline", type="primary", disabled=(uploaded is None))
+    # ── Mode selector ──────────────────────────────────────────────────────
+    mode = st.radio(
+        "Input mode",
+        ["📊  Raw Excel — run full pipeline", "⚡  Pre-processed CSV — load directly"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-    if run_btn and uploaded is not None:
-        file_bytes = uploaded.read()
-        suffix = uploaded.name.rsplit(".",1)[-1].lower()
-        tmp_path = f"/tmp/mpesa_upload_{int(time.time())}.{suffix}"
-        with open(tmp_path, "wb") as f:
-            f.write(file_bytes)
+    # ── HELPER: compute summary metrics from a ready dataframe ──────────────
+    def _metrics_from_df(df: pd.DataFrame) -> dict:
+        t0 = time.time()
+        cust = df[df["Is_Customer_Payment"] == 1]
+        amt_col = "Paid In" if "Paid In" in df.columns else ("Amount Paid" if "Amount Paid" in df.columns else None)
+        total_spent = 0.0
+        if amt_col:
+            total_spent = float(
+                pd.to_numeric(
+                    df.loc[df["Is_Customer_Payment"] == 1, amt_col]
+                    .astype(str).str.replace(r"[,\s]", "", regex=True),
+                    errors="coerce",
+                ).fillna(0).sum()
+            )
+        certainty = cust["Certainty_Level"] if "Certainty_Level" in cust.columns else pd.Series(dtype=str)
+        filled = df.get("Filled_Phone", pd.Series(dtype=str)).fillna("").astype(str)
+        return {
+            "duration_seconds": round(time.time() - t0, 3),
+            "total_rows": len(df),
+            "customer_payments_count": int(cust.shape[0]),
+            "unique_master_clients": int(df["Master_Client_ID"].replace("", np.nan).nunique()) if "Master_Client_ID" in df.columns else 0,
+            "unique_similar_ids": int(df["Similar_ID"].replace("", np.nan).nunique()) if "Similar_ID" in df.columns else 0,
+            "matched_asterisk_count": int((filled != "").sum()),
+            "high_certainty_count": int((certainty == "High").sum()),
+            "medium_certainty_count": int((certainty == "Medium").sum()),
+            "low_certainty_count": int((certainty == "Low").sum()),
+            "total_spent": total_spent,
+        }
 
-        with st.status("Running pipeline…", expanded=True) as status:
-            st.write("📂 Reading file…")
-            sheet = sheet_hint.strip() or None
-            try:
-                df, metrics = clean_mpesa_pipeline(tmp_path, output_csv_path=None, sheet_name=sheet)
-                st.write("🧩 Building TabFM features…")
-                fdf = prepare_tabfm_features(df)
-                fdf = run_tabfm_predictions(fdf)
-                st.session_state.df = df
-                st.session_state.metrics = metrics
-                st.session_state.features_df = fdf
-                status.update(label="✅ Pipeline complete!", state="complete")
-            except Exception as e:
-                status.update(label="❌ Pipeline failed", state="error")
-                st.error(str(e))
-                import traceback; st.code(traceback.format_exc())
-                st.stop()
+    # =======================================================================
+    # MODE A — Raw Excel → full pipeline
+    # =======================================================================
+    if "Raw Excel" in mode:
+        st.markdown(
+            "<div class='mode-card'>"
+            "<div style='font-size:13px;color:#94a3b8'>"
+            "Upload the original <b style='color:#f1f5f9'>M-Pesa merchant statement (.xlsx / .xls)</b>. "
+            "The pipeline will extract, clean, de-mask phones, resolve entities, and assign Master Client IDs."
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+        uploaded = st.file_uploader(
+            "Upload M-Pesa Excel",
+            type=["xlsx", "xls"],
+            help="Sheet must contain a 'Details' column in M-Pesa statement format.",
+            key="uploader_excel",
+        )
+        sheet_hint = st.text_input("Sheet name (optional)", placeholder="Leave blank to auto-detect")
+        run_btn = st.button("🚀 Run Full Pipeline", type="primary", disabled=(uploaded is None))
 
-        m = metrics
-        st.markdown(f"""
-        <div class='status-panel'>
-          <div class='section-header'>📊 Pipeline Summary</div>
-          <div class='metric-highlight'>Duration: <span>{m['duration_seconds']}s</span></div>
-          <div class='metric-highlight'>Total Rows: <span>{m['total_rows']:,}</span></div>
-          <div class='metric-highlight'>Customer Payments: <span>{m['customer_payments_count']:,}</span></div>
-          <div class='metric-highlight'>Unique Master Clients: <span>{m['unique_master_clients']:,}</span></div>
-          <div class='metric-highlight'>Similar Groups: <span>{m['unique_similar_ids']:,}</span></div>
-          <div class='metric-highlight'>Asterisks Resolved: <span>{m['matched_asterisk_count']:,}</span></div>
-          <div class='metric-highlight'>High Certainty: <span style='color:#34d399'>{m['high_certainty_count']:,}</span></div>
-          <div class='metric-highlight'>Medium Certainty: <span style='color:#fbbf24'>{m['medium_certainty_count']:,}</span></div>
-          <div class='metric-highlight'>Low Certainty: <span style='color:#f87171'>{m['low_certainty_count']:,}</span></div>
-          <div class='metric-highlight'>Total Spent (KES): <span>{m['total_spent']:,.0f}</span></div>
-        </div>""", unsafe_allow_html=True)
-        st.success("✅ Data ready! Navigate to **🏠 Dashboard** to explore the results.")
+        if run_btn and uploaded is not None:
+            file_bytes = uploaded.read()
+            suffix = uploaded.name.rsplit(".", 1)[-1].lower()
+            tmp_path = f"/tmp/mpesa_upload_{int(time.time())}.{suffix}"
+            with open(tmp_path, "wb") as f:
+                f.write(file_bytes)
+
+            with st.status("Running pipeline...", expanded=True) as status:
+                st.write("📂 Reading Excel file...")
+                sheet = sheet_hint.strip() or None
+                try:
+                    df, metrics = clean_mpesa_pipeline(tmp_path, output_csv_path=None, sheet_name=sheet)
+                    st.write("🧩 Building TabFM features...")
+                    fdf = prepare_tabfm_features(df)
+                    fdf = run_tabfm_predictions(fdf)
+                    st.session_state.df = df
+                    st.session_state.metrics = metrics
+                    st.session_state.features_df = fdf
+                    status.update(label="✅ Pipeline complete!", state="complete")
+                except Exception as e:
+                    status.update(label="❌ Pipeline failed", state="error")
+                    st.error(str(e))
+                    import traceback; st.code(traceback.format_exc())
+                    st.stop()
+
+            m = st.session_state.metrics
+            st.markdown(f"""
+            <div class='status-panel'>
+              <div class='section-header'>📊 Pipeline Summary</div>
+              <div class='metric-highlight'>Duration: <span>{m['duration_seconds']}s</span></div>
+              <div class='metric-highlight'>Total Rows: <span>{m['total_rows']:,}</span></div>
+              <div class='metric-highlight'>Customer Payments: <span>{m['customer_payments_count']:,}</span></div>
+              <div class='metric-highlight'>Unique Master Clients: <span>{m['unique_master_clients']:,}</span></div>
+              <div class='metric-highlight'>Similar Groups: <span>{m['unique_similar_ids']:,}</span></div>
+              <div class='metric-highlight'>Asterisks Resolved: <span>{m['matched_asterisk_count']:,}</span></div>
+              <div class='metric-highlight'>High Certainty: <span style='color:#34d399'>{m['high_certainty_count']:,}</span></div>
+              <div class='metric-highlight'>Medium Certainty: <span style='color:#fbbf24'>{m['medium_certainty_count']:,}</span></div>
+              <div class='metric-highlight'>Low Certainty: <span style='color:#f87171'>{m['low_certainty_count']:,}</span></div>
+              <div class='metric-highlight'>Total Spent (KES): <span>{m['total_spent']:,.0f}</span></div>
+            </div>""", unsafe_allow_html=True)
+            st.success("✅ Data ready! Navigate to **🏠 Dashboard** to explore the results.")
+
+    # =======================================================================
+    # MODE B — Pre-processed CSV → skip pipeline, load directly
+    # =======================================================================
+    else:
+        st.markdown(
+            "<div class='mode-card'>"
+            "<div style='font-size:13px;color:#94a3b8;margin-bottom:8px'>"
+            "Upload a <b style='color:#f1f5f9'>pre-processed CSV</b> "
+            "(e.g. <code style='color:#38bdf8'>final_output_with_master.csv</code>). "
+            "Already cleaned — loads instantly, no pipeline needed."
+            "</div>"
+            "<div style='font-size:11px;color:#475569'>"
+            "Required: <code>Is_Customer_Payment, From_Name, From_Phone</code> &nbsp;|&nbsp; "
+            "Optional: <code>Master_Client_ID, Similar_ID, Certainty_Level, Filled_Phone, Paid In / Amount Paid</code>"
+            "</div></div>",
+            unsafe_allow_html=True,
+        )
+
+        REQUIRED_COLS = {"Is_Customer_Payment", "From_Name", "From_Phone"}
+
+        uploaded_csv = st.file_uploader(
+            "Upload pre-processed CSV",
+            type=["csv"],
+            help="Must contain Is_Customer_Payment, From_Name, From_Phone at minimum.",
+            key="uploader_csv",
+        )
+        load_btn = st.button("⚡ Load CSV", type="primary", disabled=(uploaded_csv is None))
+
+        if load_btn and uploaded_csv is not None:
+            with st.status("Loading CSV...", expanded=True) as status:
+                st.write("📂 Reading CSV...")
+                try:
+                    df = pd.read_csv(uploaded_csv, low_memory=False)
+                    st.write(f"✅ Read {len(df):,} rows, {df.columns.size} columns")
+
+                    # Validate required columns
+                    missing = REQUIRED_COLS - set(df.columns)
+                    if missing:
+                        status.update(label="❌ Missing required columns", state="error")
+                        st.error(f"CSV is missing required columns: **{', '.join(sorted(missing))}**")
+                        st.info(f"Columns found: {list(df.columns)}")
+                        st.stop()
+
+                    # Fill missing optional columns with sensible defaults
+                    if "Master_Client_ID" not in df.columns:
+                        fallback = df["Similar_ID"] if "Similar_ID" in df.columns else ("MC_" + df.index.astype(str))
+                        df["Master_Client_ID"] = fallback
+                        st.warning("⚠️ `Master_Client_ID` not found — using `Similar_ID` as fallback.")
+                    if "Similar_ID" not in df.columns:
+                        df["Similar_ID"] = df["Master_Client_ID"]
+                    if "Certainty_Level" not in df.columns:
+                        df["Certainty_Level"] = "Low"
+                    if "Filled_Phone" not in df.columns:
+                        df["Filled_Phone"] = ""
+                    if "Paid In" not in df.columns and "Amount Paid" in df.columns:
+                        df["Paid In"] = df["Amount Paid"]
+
+                    # Normalise types
+                    df["Is_Customer_Payment"] = pd.to_numeric(df["Is_Customer_Payment"], errors="coerce").fillna(0).astype(int)
+                    df["From_Name"]        = df["From_Name"].fillna("").astype(str)
+                    df["From_Phone"]       = df["From_Phone"].fillna("").astype(str)
+                    df["Filled_Phone"]     = df["Filled_Phone"].fillna("").astype(str)
+                    df["Master_Client_ID"] = df["Master_Client_ID"].fillna("").astype(str)
+                    df["Similar_ID"]       = df["Similar_ID"].fillna("").astype(str)
+
+                    st.write("🧩 Building TabFM features...")
+                    fdf = prepare_tabfm_features(df)
+                    fdf = run_tabfm_predictions(fdf)
+                    metrics = _metrics_from_df(df)
+
+                    st.session_state.df = df
+                    st.session_state.metrics = metrics
+                    st.session_state.features_df = fdf
+                    status.update(label="✅ CSV loaded successfully!", state="complete")
+
+                except Exception as e:
+                    status.update(label="❌ Load failed", state="error")
+                    st.error(str(e))
+                    import traceback; st.code(traceback.format_exc())
+                    st.stop()
+
+            m = st.session_state.metrics
+            ca, cb, cc, cd = st.columns(4)
+            ca.metric("Total Rows", f"{m['total_rows']:,}")
+            cb.metric("Customer Payments", f"{m['customer_payments_count']:,}")
+            cc.metric("Unique Master Clients", f"{m['unique_master_clients']:,}")
+            cd.metric("Total Spent (KES)", f"{m['total_spent']:,.0f}")
+            st.success("✅ Data ready! Navigate to **🏠 Dashboard** to explore the results.")
 
 
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 # PAGE 3 — TABFM FEATURES
-# ═══════════════════════════════════════════════════════════════════════════
+# ===========================================================================
 elif page == "🧠  TabFM Features":
     st.markdown("<h2 style='color:#f1f5f9;margin-bottom:4px'>🧠 TabFM Feature Preview</h2><p style='color:#64748b;font-size:13px'>Aggregated client feature vectors ready for TabFM / TabPFN inference.</p>", unsafe_allow_html=True)
 
