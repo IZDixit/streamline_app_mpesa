@@ -13,8 +13,7 @@ Upload M-Pesa Excel statements and instantly get:
 1. Push this folder to a **public GitHub repo**
 2. Go to [share.streamlit.io](https://share.streamlit.io) and sign in
 3. Click **New app** → select your repo
-4. Set **Main file path**: `streamlit_app/app.py`  
-   *(or `app.py` if you placed it at the repo root)*
+4. Set **Main file path**: `app.py`
 5. Click **Deploy** — done!
 
 ---
